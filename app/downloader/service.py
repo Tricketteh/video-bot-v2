@@ -57,6 +57,8 @@ class DownloaderService:
             "redgifs": asyncio.Semaphore(settings.redgifs_concurrency),
             "unknown": asyncio.Semaphore(settings.unknown_concurrency),
         }
+        self._instagram_request_lock = asyncio.Lock()
+        self._last_instagram_request_ts: float = 0.0
 
     @property
     def last_successful_download_ts(self) -> float | None:
@@ -173,6 +175,10 @@ class DownloaderService:
                         file_count=len(direct_files),
                     )
                     return direct_files
+                raise DownloadError(
+                    "Instagram post (/p/) did not return photo items via gallery-dl. "
+                    "Check cookies/instagram.txt (or cookies/ig.txt)."
+                )
 
             if platform == "tiktok" and is_tiktok_photo_path(normalized_url):
                 direct_files = await self._download_gallery_page(normalized_url, platform, url_hash)
@@ -232,6 +238,9 @@ class DownloaderService:
         self._recent_set.add(url_hash)
 
     async def _try_gallery_extract(self, url: str, platform: str) -> list[MediaItem]:
+        if platform == "instagram":
+            await self._wait_instagram_request_slot("gallery_extract")
+
         def _run() -> list[MediaItem]:
             cookie = get_cookie_file(self.settings.cookies_dir, platform)
             cmd = [sys.executable, "-m", "gallery_dl", "--dump-json"]
@@ -321,6 +330,9 @@ class DownloaderService:
         return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
     async def _download_gallery_page(self, url: str, platform: str, url_hash: str) -> list[str]:
+        if platform == "instagram":
+            await self._wait_instagram_request_slot("gallery_download")
+
         def _run() -> list[str]:
             tmp_root = self.settings.download_tmp_root
             tmp_root.mkdir(parents=True, exist_ok=True)
@@ -374,6 +386,27 @@ class DownloaderService:
             return []
 
         return await asyncio.to_thread(_run)
+
+    async def _wait_instagram_request_slot(self, operation: str) -> None:
+        cooldown = self.settings.instagram_request_cooldown_seconds
+        if cooldown <= 0:
+            return
+
+        async with self._instagram_request_lock:
+            now = time.monotonic()
+            elapsed = now - self._last_instagram_request_ts
+            wait_seconds = cooldown - elapsed
+            if wait_seconds > 0:
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "INSTAGRAM_COOLDOWN_WAIT",
+                    "waiting before instagram extractor request",
+                    operation=operation,
+                    wait_seconds=round(wait_seconds, 2),
+                )
+                await asyncio.sleep(wait_seconds)
+            self._last_instagram_request_ts = time.monotonic()
 
     def _pick_media_url(self, payload: dict[str, object]) -> str | None:
         candidates = [u for u in self._iter_http_urls(payload) if self._looks_like_media_url(u)]

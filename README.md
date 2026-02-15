@@ -74,6 +74,7 @@ python -c "import telegram; print(telegram.__version__)"
 - Пользователь должен иметь право скачивать контент.
 - Heartbeat лога listener настраивается через LISTENER_HEARTBEAT_SECONDS (по умолчанию 300).
 - Интервал логов прогресса скачивания настраивается через DOWNLOAD_PROGRESS_LOG_INTERVAL_SECONDS (по умолчанию 1.0).
+- Instagram anti-429 cooldown между extractor-запросами настраивается через INSTAGRAM_REQUEST_COOLDOWN_SECONDS (по умолчанию 2.0).
 
 ## CI
 

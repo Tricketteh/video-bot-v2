@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from app.downloader.models import MediaItem
-from app.downloader.service import DownloaderService
+from app.downloader.service import DownloadError, DownloaderService
 from app.utils.config import Settings
 
 
@@ -143,3 +143,27 @@ async def test_gallery_extract_reads_nested_media_url(
     items = await service._try_gallery_extract("https://www.instagram.com/p/abc/", "instagram")
     assert len(items) == 1
     assert items[0].source_url.endswith("photo1.jpg")
+
+
+@pytest.mark.asyncio
+async def test_instagram_post_pipeline_does_not_fallback_to_second_extract(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = Settings(download_tmp_root=tmp_path)
+    service = DownloaderService(settings)
+
+    async def fake_gallery_page(url: str, platform: str, url_hash: str) -> list[str]:
+        return []
+
+    async def fail_extract(_: str) -> list[MediaItem]:
+        raise AssertionError("extract_media_items should not be called for instagram /p/ fallback")
+
+    monkeypatch.setattr(service, "_download_gallery_page", fake_gallery_page)
+    monkeypatch.setattr(service, "extract_media_items", fail_extract)
+
+    with pytest.raises(DownloadError):
+        await service._download_pipeline(
+            "https://www.instagram.com/p/abc/",
+            "a" * 64,
+        )

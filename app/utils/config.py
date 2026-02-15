@@ -41,6 +41,9 @@ class Settings:
             "Chrome/124.0.0.0 Safari/537.36"
         ),
     )
+    instagram_request_cooldown_seconds: float = float(
+        os.getenv("INSTAGRAM_REQUEST_COOLDOWN_SECONDS", "2.0")
+    )
 
     @property
     def allowed_group_ids(self) -> set[int]:
