@@ -1,0 +1,18 @@
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.14"
+ignore_missing_imports = true
+disable_error_code = ["import-untyped"]
+warn_unused_configs = true
+strict_optional = true

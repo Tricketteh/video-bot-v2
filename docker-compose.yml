@@ -1,0 +1,43 @@
+services:
+  bot:
+    build:
+      context: .
+    command: python -m app.telegram_bot.main
+    env_file:
+      - .env
+    volumes:
+      - ./cookies:/app/cookies:ro
+      - ./app:/app/app
+    depends_on:
+      - photo-service
+      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  photo-service:
+    build:
+      context: .
+    command: uvicorn app.photo_service.main:app --host 0.0.0.0 --port 8080
+    env_file:
+      - .env
+    volumes:
+      - ./cookies:/app/cookies:ro
+      - ./app:/app/app
+    expose:
+      - "8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    expose:
+      - "6379"
