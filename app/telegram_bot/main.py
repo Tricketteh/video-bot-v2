@@ -32,7 +32,7 @@ from telegram.ext import (
 from app.downloader.service import DownloadError, DownloaderService
 from app.telegram_bot.queue import AsyncJobQueue, QueueJob
 from app.utils.config import Settings
-from app.utils.logging_config import configure_logging
+from app.utils.logging_config import configure_logging, log_event
 
 URL_RE = re.compile(r"https?://\S+")
 logger = logging.getLogger(__name__)
@@ -52,7 +52,26 @@ async def health() -> dict[str, str | None]:
 
 
 async def _download_job(job: QueueJob) -> list[str]:
+    log_event(
+        logger,
+        logging.INFO,
+        "DOWNLOAD_JOB_START",
+        "processing queued download job",
+        url=job.url,
+        chat_id=job.chat_id,
+        user_id=job.user_id,
+    )
     result = await downloader.download_media_items(job.url)
+    log_event(
+        logger,
+        logging.INFO,
+        "DOWNLOAD_JOB_DONE",
+        "download job completed",
+        url=job.url,
+        chat_id=job.chat_id,
+        user_id=job.user_id,
+        file_count=len(result.files),
+    )
     return result.files
 
 
@@ -91,6 +110,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     urls = urls[: settings.max_links_per_message]
+    log_event(
+        logger,
+        logging.INFO,
+        "MESSAGE_URLS_ACCEPTED",
+        "accepted message with media urls",
+        chat_id=chat.id,
+        user_id=user.id,
+        url_count=len(urls),
+    )
 
     try:
         await message.delete()
@@ -109,10 +137,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             files = await job_queue.submit(job)
             await _send_files(context, chat.id, files, job.username, url)
             await progress_msg.delete()
+            log_event(
+                logger,
+                logging.INFO,
+                "MESSAGE_URL_DONE",
+                "url processed and sent to chat",
+                chat_id=chat.id,
+                user_id=user.id,
+                url=url,
+                file_count=len(files),
+            )
         except DownloadError as exc:
-            logger.warning(
+            log_event(
+                logger,
+                logging.WARNING,
+                "MESSAGE_URL_FAIL",
                 "download failed",
-                extra={"extra": {"url": url, "chat_id": chat.id, "reason": str(exc)}},
+                url=url,
+                chat_id=chat.id,
+                user_id=user.id,
+                reason=str(exc),
             )
             await progress_msg.edit_text(f"Error: {exc}")
         except Exception as exc:  # noqa: BLE001
@@ -256,6 +300,23 @@ def _is_allowed_chat(chat_id: int, chat_type: str) -> bool:
     return chat_id in allowed
 
 
+async def _listener_heartbeat(stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set():
+        log_event(
+            logger,
+            logging.INFO,
+            "LISTENER_ACTIVE",
+            "bot listener is active",
+            interval_seconds=settings.listener_heartbeat_seconds,
+        )
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(), timeout=settings.listener_heartbeat_seconds
+            )
+        except TimeoutError:
+            continue
+
+
 async def run() -> None:
     if not settings.bot_token:
         raise RuntimeError("BOT_TOKEN is required")
@@ -273,17 +334,25 @@ async def run() -> None:
     )
     health_server = uvicorn.Server(health_config)
     health_task = asyncio.create_task(health_server.serve())
+    heartbeat_stop = asyncio.Event()
+    heartbeat_task: asyncio.Task | None = None
 
     await job_queue.start(_download_job)
     try:
+        log_event(logger, logging.INFO, "BOT_STARTING", "initializing telegram bot")
         await app.initialize()
         await app.start()
         if app.updater is None:
             raise RuntimeError("Updater is not available")
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        heartbeat_task = asyncio.create_task(_listener_heartbeat(heartbeat_stop))
+        log_event(logger, logging.INFO, "BOT_POLLING", "telegram polling started")
         while True:
             await asyncio.sleep(3600)
     finally:
+        heartbeat_stop.set()
+        if heartbeat_task is not None:
+            await heartbeat_task
         health_server.should_exit = True
         await health_task
         if app.updater is not None:

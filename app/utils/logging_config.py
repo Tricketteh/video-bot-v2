@@ -15,6 +15,7 @@ class JsonFormatter(logging.Formatter):
             "ts": datetime.now(UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
+            "module": record.module,
             "message": record.getMessage(),
         }
         if hasattr(record, "extra") and isinstance(record.extra, dict):
@@ -43,6 +44,15 @@ class ThrottledDuplicateFilter(logging.Filter):
                 return False
             self._last_seen[key] = now
         return True
+
+
+def log_event(
+    logger: logging.Logger, level: int, event: str, message: str, **context: Any
+) -> None:
+    payload = {"event": event}
+    if context:
+        payload.update(context)
+    logger.log(level, message, extra={"extra": payload})
 
 
 def configure_logging(level: str = "INFO", json_logs: bool = True) -> None:

@@ -29,6 +29,10 @@ class Settings:
     photo_service_url: str = os.getenv("PHOTO_SERVICE_URL", "http://photo-service:8080")
     enable_photo_service: bool = os.getenv("ENABLE_PHOTO_SERVICE", "0") == "1"
     health_port: int = int(os.getenv("BOT_HEALTH_PORT", "8090"))
+    listener_heartbeat_seconds: int = int(os.getenv("LISTENER_HEARTBEAT_SECONDS", "300"))
+    download_progress_log_interval_seconds: float = float(
+        os.getenv("DOWNLOAD_PROGRESS_LOG_INTERVAL_SECONDS", "1.0")
+    )
 
     @property
     def allowed_group_ids(self) -> set[int]:

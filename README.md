@@ -72,6 +72,8 @@ python -c "import telegram; print(telegram.__version__)"
 - ¬ логах только метаданные.
 - ƒобавить whitelist групп (`GROUP_WHITELIST`) и per-user rate limit (`PER_USER_RATE_LIMIT`).
 - ѕользователь должен иметь право скачивать контент.
+- Heartbeat лога listener настраиваетс€ через LISTENER_HEARTBEAT_SECONDS (по умолчанию 300).
+- »нтервал логов прогресса скачивани€ настраиваетс€ через DOWNLOAD_PROGRESS_LOG_INTERVAL_SECONDS (по умолчанию 1.0).
 
 ## CI
 

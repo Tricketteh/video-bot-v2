@@ -6,6 +6,7 @@ import json
 import logging
 import subprocess
 import sys
+import time
 from collections import deque
 from collections.abc import Iterator
 from pathlib import Path
@@ -23,6 +24,7 @@ from app.downloader.platforms import (
 )
 from app.utils.config import Settings
 from app.utils.cookies import get_cookie_file
+from app.utils.logging_config import log_event
 from app.utils.retry import retry_async
 
 logger = logging.getLogger(__name__)
@@ -141,11 +143,30 @@ class DownloaderService:
         semaphore = self._platform_semaphores.get(platform, self._platform_semaphores["unknown"])
 
         async with semaphore:
+            log_event(
+                logger,
+                logging.INFO,
+                "PIPELINE_START",
+                "download pipeline started",
+                url=normalized_url,
+                platform=platform,
+                url_hash=url_hash[:12],
+            )
             if platform == "instagram" and is_instagram_post_path(normalized_url):
                 direct_files = await self._download_gallery_page(normalized_url, platform, url_hash)
                 if direct_files:
                     self._mark_recent(url_hash)
                     self._last_successful_download_ts = asyncio.get_running_loop().time()
+                    log_event(
+                        logger,
+                        logging.INFO,
+                        "PIPELINE_DONE",
+                        "download pipeline completed via gallery page",
+                        url=normalized_url,
+                        platform=platform,
+                        url_hash=url_hash[:12],
+                        file_count=len(direct_files),
+                    )
                     return direct_files
 
             if platform == "tiktok" and is_tiktok_photo_path(normalized_url):
@@ -153,6 +174,16 @@ class DownloaderService:
                 if direct_files:
                     self._mark_recent(url_hash)
                     self._last_successful_download_ts = asyncio.get_running_loop().time()
+                    log_event(
+                        logger,
+                        logging.INFO,
+                        "PIPELINE_DONE",
+                        "download pipeline completed via gallery page",
+                        url=normalized_url,
+                        platform=platform,
+                        url_hash=url_hash[:12],
+                        file_count=len(direct_files),
+                    )
                     return direct_files
 
             items = await self.extract_media_items(normalized_url)
@@ -176,6 +207,16 @@ class DownloaderService:
 
             self._mark_recent(url_hash)
             self._last_successful_download_ts = asyncio.get_running_loop().time()
+            log_event(
+                logger,
+                logging.INFO,
+                "PIPELINE_DONE",
+                "download pipeline completed",
+                url=normalized_url,
+                platform=platform,
+                url_hash=url_hash[:12],
+                file_count=len(files),
+            )
             return files
 
     def _mark_recent(self, url_hash: str) -> None:
@@ -420,6 +461,54 @@ class DownloaderService:
         def _run() -> str:
             cookie = get_cookie_file(self.settings.cookies_dir, media_item.platform)
             outtmpl = str(tmpdir / f"{media_item.index:03d}.%(ext)s")
+            progress_state = {"last_emit": 0.0}
+            progress_interval = self.settings.download_progress_log_interval_seconds
+
+            def _hook(payload: dict[str, object]) -> None:
+                status = str(payload.get("status", "unknown"))
+                now = time.monotonic()
+                if status == "downloading" and now - progress_state["last_emit"] < progress_interval:
+                    return
+
+                downloaded = int(payload.get("downloaded_bytes", 0) or 0)
+                total = int(
+                    payload.get("total_bytes")
+                    or payload.get("total_bytes_estimate")
+                    or media_item.estimated_size
+                    or 0
+                )
+                speed = float(payload.get("speed", 0.0) or 0.0)
+                eta = payload.get("eta")
+                eta_int = int(eta) if isinstance(eta, (int, float)) else None
+
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "DOWNLOAD_PROGRESS",
+                    "yt-dlp download progress",
+                    method="yt-dlp",
+                    platform=media_item.platform,
+                    source_url=media_item.source_url,
+                    item_index=media_item.index,
+                    status=status,
+                    downloaded_bytes=downloaded,
+                    total_bytes=total if total > 0 else None,
+                    percent=round((downloaded / total) * 100, 2) if total > 0 else None,
+                    speed_bps=round(speed, 2) if speed else None,
+                    eta_seconds=eta_int,
+                )
+                progress_state["last_emit"] = now
+
+            log_event(
+                logger,
+                logging.INFO,
+                "DOWNLOAD_START",
+                "yt-dlp download started",
+                method="yt-dlp",
+                platform=media_item.platform,
+                source_url=media_item.source_url,
+                item_index=media_item.index,
+            )
             opts: dict[str, object] = {
                 "outtmpl": outtmpl,
                 "format": "bv*+ba/b",
@@ -427,6 +516,7 @@ class DownloaderService:
                 "quiet": True,
                 "noprogress": True,
                 "retries": self.settings.retry_attempts,
+                "progress_hooks": [_hook],
             }
             if cookie.exists and cookie.path:
                 opts["cookiefile"] = str(cookie.path)
@@ -437,11 +527,35 @@ class DownloaderService:
             candidates = sorted(tmpdir.glob(f"{media_item.index:03d}.*"))
             if not candidates:
                 raise DownloadError("yt-dlp finished but no file created")
+            final_size = candidates[0].stat().st_size
+            log_event(
+                logger,
+                logging.INFO,
+                "DOWNLOAD_DONE",
+                "yt-dlp download finished",
+                method="yt-dlp",
+                platform=media_item.platform,
+                source_url=media_item.source_url,
+                item_index=media_item.index,
+                target_path=str(candidates[0]),
+                file_size_bytes=final_size,
+            )
             return str(candidates[0])
 
         try:
             return await asyncio.to_thread(_run)
         except Exception as exc:  # noqa: BLE001
+            log_event(
+                logger,
+                logging.WARNING,
+                "DOWNLOAD_FAIL",
+                "yt-dlp download failed",
+                method="yt-dlp",
+                platform=media_item.platform,
+                source_url=media_item.source_url,
+                item_index=media_item.index,
+                reason=str(exc),
+            )
             msg = str(exc).lower()
             if "login" in msg:
                 raise DownloadError("Login required") from exc
@@ -459,15 +573,84 @@ class DownloaderService:
             parsed = urlparse(media_item.source_url)
             ext = Path(parsed.path).suffix or default_ext
             target = tmpdir / f"{media_item.index:03d}{ext}"
+            started = time.monotonic()
+            last_emit = started
+            progress_interval = self.settings.download_progress_log_interval_seconds
+
+            log_event(
+                logger,
+                logging.INFO,
+                "DOWNLOAD_START",
+                "direct download started",
+                method="direct-http",
+                platform=media_item.platform,
+                source_url=media_item.source_url,
+                item_index=media_item.index,
+                target_path=str(target),
+                expected_size_bytes=media_item.estimated_size,
+            )
             with requests.get(media_item.source_url, stream=True, timeout=30) as response:
                 response.raise_for_status()
+                total = int(response.headers.get("Content-Length", "0") or 0)
+                downloaded = 0
                 with target.open("wb") as fh:
                     for chunk in response.iter_content(chunk_size=1024 * 128):
                         if chunk:
                             fh.write(chunk)
+                            downloaded += len(chunk)
+                            now = time.monotonic()
+                            if now - last_emit >= progress_interval:
+                                elapsed = max(now - started, 0.001)
+                                speed = downloaded / elapsed
+                                eta = int((total - downloaded) / speed) if total > 0 and speed > 0 else None
+                                log_event(
+                                    logger,
+                                    logging.INFO,
+                                    "DOWNLOAD_PROGRESS",
+                                    "direct download progress",
+                                    method="direct-http",
+                                    platform=media_item.platform,
+                                    source_url=media_item.source_url,
+                                    item_index=media_item.index,
+                                    downloaded_bytes=downloaded,
+                                    total_bytes=total if total > 0 else None,
+                                    percent=round((downloaded / total) * 100, 2)
+                                    if total > 0
+                                    else None,
+                                    speed_bps=round(speed, 2),
+                                    eta_seconds=eta,
+                                )
+                                last_emit = now
+
+            finished = time.monotonic()
+            size = target.stat().st_size if target.exists() else 0
+            log_event(
+                logger,
+                logging.INFO,
+                "DOWNLOAD_DONE",
+                "direct download finished",
+                method="direct-http",
+                platform=media_item.platform,
+                source_url=media_item.source_url,
+                item_index=media_item.index,
+                target_path=str(target),
+                file_size_bytes=size,
+                duration_seconds=round(finished - started, 2),
+            )
             return str(target)
 
         try:
             return await asyncio.to_thread(_run)
         except requests.RequestException as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "DOWNLOAD_FAIL",
+                "direct download failed",
+                method="direct-http",
+                platform=media_item.platform,
+                source_url=media_item.source_url,
+                item_index=media_item.index,
+                reason=str(exc),
+            )
             raise DownloadError(f"Direct download failed: {exc}") from exc
