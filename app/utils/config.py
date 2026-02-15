@@ -33,6 +33,14 @@ class Settings:
     download_progress_log_interval_seconds: float = float(
         os.getenv("DOWNLOAD_PROGRESS_LOG_INTERVAL_SECONDS", "1.0")
     )
+    http_user_agent: str = os.getenv(
+        "HTTP_USER_AGENT",
+        (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+    )
 
     @property
     def allowed_group_ids(self) -> set[int]:

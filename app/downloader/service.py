@@ -65,7 +65,12 @@ class DownloaderService:
     async def normalize_url(self, url: str) -> str:
         def _resolve() -> str:
             try:
-                response = requests.get(url, allow_redirects=True, timeout=10)
+                response = requests.get(
+                    url,
+                    allow_redirects=True,
+                    timeout=10,
+                    headers={"User-Agent": self.settings.http_user_agent},
+                )
                 return response.url
             except requests.RequestException:
                 return url
@@ -230,6 +235,7 @@ class DownloaderService:
         def _run() -> list[MediaItem]:
             cookie = get_cookie_file(self.settings.cookies_dir, platform)
             cmd = [sys.executable, "-m", "gallery_dl", "--dump-json"]
+            cmd.extend(["-o", f"extractor.user-agent={self.settings.http_user_agent}"])
             if cookie.exists and cookie.path:
                 cmd.extend(["--cookies", str(cookie.path)])
             cmd.append(url)
@@ -323,6 +329,7 @@ class DownloaderService:
 
             cookie = get_cookie_file(self.settings.cookies_dir, platform)
             cmd = [sys.executable, "-m", "gallery_dl", "--dest", str(per_url_dir), url]
+            cmd.extend(["-o", f"extractor.user-agent={self.settings.http_user_agent}"])
             if cookie.exists and cookie.path:
                 cmd.extend(["--cookies", str(cookie.path)])
 
@@ -422,6 +429,7 @@ class DownloaderService:
                 "skip_download": True,
                 "extract_flat": False,
                 "noplaylist": False,
+                "http_headers": {"User-Agent": self.settings.http_user_agent},
             }
             if cookie.exists and cookie.path:
                 opts["cookiefile"] = str(cookie.path)
@@ -517,6 +525,7 @@ class DownloaderService:
                 "noprogress": True,
                 "retries": self.settings.retry_attempts,
                 "progress_hooks": [_hook],
+                "http_headers": {"User-Agent": self.settings.http_user_agent},
             }
             if cookie.exists and cookie.path:
                 opts["cookiefile"] = str(cookie.path)
@@ -589,7 +598,12 @@ class DownloaderService:
                 target_path=str(target),
                 expected_size_bytes=media_item.estimated_size,
             )
-            with requests.get(media_item.source_url, stream=True, timeout=30) as response:
+            with requests.get(
+                media_item.source_url,
+                stream=True,
+                timeout=30,
+                headers={"User-Agent": self.settings.http_user_agent},
+            ) as response:
                 response.raise_for_status()
                 total = int(response.headers.get("Content-Length", "0") or 0)
                 downloaded = 0
