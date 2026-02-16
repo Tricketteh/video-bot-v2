@@ -4,8 +4,11 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections import deque
 from collections.abc import Iterator
@@ -242,85 +245,88 @@ class DownloaderService:
             await self._wait_instagram_request_slot("gallery_extract")
 
         def _run() -> list[MediaItem]:
-            cookie = get_cookie_file(self.settings.cookies_dir, platform)
+            cookie_path = self._prepare_writable_cookiefile(platform)
             cmd = [sys.executable, "-m", "gallery_dl", "--dump-json"]
             cmd.extend(["-o", f"extractor.user-agent={self.settings.http_user_agent}"])
-            if cookie.exists and cookie.path:
-                cmd.extend(["--cookies", str(cookie.path)])
-            cmd.append(url)
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if proc.returncode != 0:
-                stderr = proc.stderr.lower()
-                reason = (
-                    "rate_limited"
-                    if "rate" in stderr
-                    else "login_required" if "login" in stderr else "gallery_error"
-                )
-                logger.warning(
-                    "gallery extraction failed",
-                    extra={
-                        "extra": {
-                            "platform": platform,
-                            "reason": reason,
-                            "stderr": proc.stderr[:200],
-                        }
-                    },
-                )
-                return []
-
-            items: list[MediaItem] = []
-            for idx, line in enumerate(proc.stdout.splitlines()):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                direct_url: str | None = None
-                ext = ""
-                filesize: int | None = None
-                raw_meta: dict[str, object] = {}
-
-                if isinstance(data, str):
-                    if self._is_http_url(data):
-                        direct_url = data
-                elif isinstance(data, dict):
-                    candidate = self._pick_media_url(data)
-                    if isinstance(candidate, str) and self._is_http_url(candidate):
-                        direct_url = candidate
-                    ext = str(data.get("extension", "")).lower()
-                    if isinstance(data.get("filesize"), int):
-                        filesize = data["filesize"]
-                    raw_meta = data
-                elif isinstance(data, list):
-                    for candidate in self._iter_http_urls(data):
-                        if self._looks_like_media_url(candidate):
-                            direct_url = candidate
-                            break
-
-                if not direct_url:
-                    continue
-
-                parsed_url = urlparse(str(direct_url))
-                ext = ext or (
-                    Path(parsed_url.path).suffix.lower().lstrip(".")
-                )
-                media_type = "video" if ext in {"mp4", "webm", "mov"} else "photo"
-                method = "direct-http"
-                items.append(
-                    MediaItem(
-                        type=media_type,  # type: ignore[arg-type]
-                        source_url=direct_url,
-                        platform=platform,
-                        meta={"raw": raw_meta} if raw_meta else {},
-                        index=idx,
-                        estimated_size=filesize,
-                        download_method=method,  # type: ignore[arg-type]
+            try:
+                if cookie_path:
+                    cmd.extend(["--cookies", str(cookie_path)])
+                cmd.append(url)
+                proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                if proc.returncode != 0:
+                    stderr = proc.stderr.lower()
+                    reason = (
+                        "rate_limited"
+                        if "rate" in stderr
+                        else "login_required" if "login" in stderr else "gallery_error"
                     )
-                )
-            return items
+                    logger.warning(
+                        "gallery extraction failed",
+                        extra={
+                            "extra": {
+                                "platform": platform,
+                                "reason": reason,
+                                "stderr": proc.stderr[:200],
+                            }
+                        },
+                    )
+                    return []
+
+                items: list[MediaItem] = []
+                for idx, line in enumerate(proc.stdout.splitlines()):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    direct_url: str | None = None
+                    ext = ""
+                    filesize: int | None = None
+                    raw_meta: dict[str, object] = {}
+
+                    if isinstance(data, str):
+                        if self._is_http_url(data):
+                            direct_url = data
+                    elif isinstance(data, dict):
+                        candidate = self._pick_media_url(data)
+                        if isinstance(candidate, str) and self._is_http_url(candidate):
+                            direct_url = candidate
+                        ext = str(data.get("extension", "")).lower()
+                        if isinstance(data.get("filesize"), int):
+                            filesize = data["filesize"]
+                        raw_meta = data
+                    elif isinstance(data, list):
+                        for candidate in self._iter_http_urls(data):
+                            if self._looks_like_media_url(candidate):
+                                direct_url = candidate
+                                break
+
+                    if not direct_url:
+                        continue
+
+                    parsed_url = urlparse(str(direct_url))
+                    ext = ext or (
+                        Path(parsed_url.path).suffix.lower().lstrip(".")
+                    )
+                    media_type = "video" if ext in {"mp4", "webm", "mov"} else "photo"
+                    method = "direct-http"
+                    items.append(
+                        MediaItem(
+                            type=media_type,  # type: ignore[arg-type]
+                            source_url=direct_url,
+                            platform=platform,
+                            meta={"raw": raw_meta} if raw_meta else {},
+                            index=idx,
+                            estimated_size=filesize,
+                            download_method=method,  # type: ignore[arg-type]
+                        )
+                    )
+                return items
+            finally:
+                self._cleanup_temp_cookiefile(cookie_path)
 
         return await asyncio.to_thread(_run)
 
@@ -339,51 +345,54 @@ class DownloaderService:
             per_url_dir = tmp_root / url_hash[:12]
             per_url_dir.mkdir(parents=True, exist_ok=True)
 
-            cookie = get_cookie_file(self.settings.cookies_dir, platform)
+            cookie_path = self._prepare_writable_cookiefile(platform)
             cmd = [sys.executable, "-m", "gallery_dl", "--dest", str(per_url_dir), url]
             cmd.extend(["-o", f"extractor.user-agent={self.settings.http_user_agent}"])
-            if cookie.exists and cookie.path:
-                cmd.extend(["--cookies", str(cookie.path)])
+            try:
+                if cookie_path:
+                    cmd.extend(["--cookies", str(cookie_path)])
 
-            before = {p.resolve() for p in per_url_dir.rglob("*") if p.is_file()}
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            after = {p.resolve() for p in per_url_dir.rglob("*") if p.is_file()}
-            created = [p for p in sorted(after - before) if p.suffix.lower() in {
-                ".jpg",
-                ".jpeg",
-                ".png",
-                ".webp",
-                ".mp4",
-                ".webm",
-                ".mov",
-            }]
+                before = {p.resolve() for p in per_url_dir.rglob("*") if p.is_file()}
+                proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                after = {p.resolve() for p in per_url_dir.rglob("*") if p.is_file()}
+                created = [p for p in sorted(after - before) if p.suffix.lower() in {
+                    ".jpg",
+                    ".jpeg",
+                    ".png",
+                    ".webp",
+                    ".mp4",
+                    ".webm",
+                    ".mov",
+                }]
 
-            if created:
-                return [str(p) for p in created]
+                if created:
+                    return [str(p) for p in created]
 
-            if proc.returncode != 0:
-                logger.warning(
-                    "gallery page download failed",
-                    extra={
-                        "extra": {
-                            "platform": platform,
-                            "url": url,
-                            "stderr": proc.stderr[:300],
-                        }
-                    },
-                )
-            else:
-                logger.warning(
-                    "gallery page download returned no files",
-                    extra={
-                        "extra": {
-                            "platform": platform,
-                            "url": url,
-                            "stdout": proc.stdout[:300],
-                        }
-                    },
-                )
-            return []
+                if proc.returncode != 0:
+                    logger.warning(
+                        "gallery page download failed",
+                        extra={
+                            "extra": {
+                                "platform": platform,
+                                "url": url,
+                                "stderr": proc.stderr[:300],
+                            }
+                        },
+                    )
+                else:
+                    logger.warning(
+                        "gallery page download returned no files",
+                        extra={
+                            "extra": {
+                                "platform": platform,
+                                "url": url,
+                                "stdout": proc.stdout[:300],
+                            }
+                        },
+                    )
+                return []
+            finally:
+                self._cleanup_temp_cookiefile(cookie_path)
 
         return await asyncio.to_thread(_run)
 
@@ -456,7 +465,7 @@ class DownloaderService:
 
     async def _yt_extract(self, url: str, platform: str) -> list[MediaItem]:
         def _run() -> list[MediaItem]:
-            cookie = get_cookie_file(self.settings.cookies_dir, platform)
+            cookie_path = self._prepare_writable_cookiefile(platform)
             opts: dict[str, object] = {
                 "quiet": True,
                 "skip_download": True,
@@ -464,43 +473,46 @@ class DownloaderService:
                 "noplaylist": False,
                 "http_headers": {"User-Agent": self.settings.http_user_agent},
             }
-            if cookie.exists and cookie.path:
-                opts["cookiefile"] = str(cookie.path)
+            try:
+                if cookie_path:
+                    opts["cookiefile"] = str(cookie_path)
 
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
 
-            entries = info.get("entries") if isinstance(info, dict) else None
-            raw_items = entries if isinstance(entries, list) and entries else [info]
-            items: list[MediaItem] = []
-            for idx, raw in enumerate(raw_items):
-                if not isinstance(raw, dict):
-                    continue
-                source_url = raw.get("webpage_url") or raw.get("url") or url
-                items.append(
-                    MediaItem(
-                        type="video",
-                        source_url=str(source_url),
-                        platform=platform,
-                        meta={"id": raw.get("id"), "title": raw.get("title")},
-                        index=idx,
-                        estimated_size=(
-                            raw.get("filesize_approx")
-                            if isinstance(raw.get("filesize_approx"), int)
-                            else None
-                        ),
-                        download_method="yt-dlp",
+                entries = info.get("entries") if isinstance(info, dict) else None
+                raw_items = entries if isinstance(entries, list) and entries else [info]
+                items: list[MediaItem] = []
+                for idx, raw in enumerate(raw_items):
+                    if not isinstance(raw, dict):
+                        continue
+                    source_url = raw.get("webpage_url") or raw.get("url") or url
+                    items.append(
+                        MediaItem(
+                            type="video",
+                            source_url=str(source_url),
+                            platform=platform,
+                            meta={"id": raw.get("id"), "title": raw.get("title")},
+                            index=idx,
+                            estimated_size=(
+                                raw.get("filesize_approx")
+                                if isinstance(raw.get("filesize_approx"), int)
+                                else None
+                            ),
+                            download_method="yt-dlp",
+                        )
                     )
-                )
-            if not items:
-                raise DownloadError("No media items extracted by yt-dlp")
-            return items
+                if not items:
+                    raise DownloadError("No media items extracted by yt-dlp")
+                return items
+            finally:
+                self._cleanup_temp_cookiefile(cookie_path)
 
         return await asyncio.to_thread(_run)
 
     async def _download_video_with_yt(self, media_item: MediaItem, tmpdir: Path) -> str:
         def _run() -> str:
-            cookie = get_cookie_file(self.settings.cookies_dir, media_item.platform)
+            cookie_path = self._prepare_writable_cookiefile(media_item.platform)
             outtmpl = str(tmpdir / f"{media_item.index:03d}.%(ext)s")
             progress_state = {"last_emit": 0.0}
             progress_interval = self.settings.download_progress_log_interval_seconds
@@ -560,29 +572,32 @@ class DownloaderService:
                 "progress_hooks": [_hook],
                 "http_headers": {"User-Agent": self.settings.http_user_agent},
             }
-            if cookie.exists and cookie.path:
-                opts["cookiefile"] = str(cookie.path)
+            try:
+                if cookie_path:
+                    opts["cookiefile"] = str(cookie_path)
 
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([media_item.source_url])
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.download([media_item.source_url])
 
-            candidates = sorted(tmpdir.glob(f"{media_item.index:03d}.*"))
-            if not candidates:
-                raise DownloadError("yt-dlp finished but no file created")
-            final_size = candidates[0].stat().st_size
-            log_event(
-                logger,
-                logging.INFO,
-                "DOWNLOAD_DONE",
-                "yt-dlp download finished",
-                method="yt-dlp",
-                platform=media_item.platform,
-                source_url=media_item.source_url,
-                item_index=media_item.index,
-                target_path=str(candidates[0]),
-                file_size_bytes=final_size,
-            )
-            return str(candidates[0])
+                candidates = sorted(tmpdir.glob(f"{media_item.index:03d}.*"))
+                if not candidates:
+                    raise DownloadError("yt-dlp finished but no file created")
+                final_size = candidates[0].stat().st_size
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "DOWNLOAD_DONE",
+                    "yt-dlp download finished",
+                    method="yt-dlp",
+                    platform=media_item.platform,
+                    source_url=media_item.source_url,
+                    item_index=media_item.index,
+                    target_path=str(candidates[0]),
+                    file_size_bytes=final_size,
+                )
+                return str(candidates[0])
+            finally:
+                self._cleanup_temp_cookiefile(cookie_path)
 
         try:
             return await asyncio.to_thread(_run)
@@ -604,6 +619,30 @@ class DownloaderService:
             if "rate" in msg or "429" in msg:
                 raise DownloadError("Rate-limited") from exc
             raise DownloadError(f"Video download failed: {exc}") from exc
+
+    def _prepare_writable_cookiefile(self, platform: str) -> Path | None:
+        cookie = get_cookie_file(self.settings.cookies_dir, platform)
+        if not cookie.exists or not cookie.path:
+            return None
+        tmp_root = self.settings.download_tmp_root
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(
+            prefix=f"cookie-{platform}-",
+            suffix=".txt",
+            dir=str(tmp_root),
+        )
+        os.close(fd)
+        shutil.copy2(cookie.path, temp_path)
+        return Path(temp_path)
+
+    @staticmethod
+    def _cleanup_temp_cookiefile(path: Path | None) -> None:
+        if not path:
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            logger.debug("failed to cleanup temp cookie file", extra={"path": str(path)})
 
     async def _download_binary_direct(
         self,

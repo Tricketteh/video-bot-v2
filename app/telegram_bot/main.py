@@ -30,7 +30,8 @@ from telegram.ext import (
     filters,
 )
 
-from app.downloader.service import DownloadError, DownloaderService
+from app.downloader.platforms import detect_platform, is_youtube_shorts
+from app.downloader.service import DownloadError, DownloaderService, UnsupportedUrl
 from app.telegram_bot.queue import AsyncJobQueue, QueueJob
 from app.utils.config import Settings
 from app.utils.logging_config import configure_logging, log_event
@@ -119,6 +120,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    filtered_urls: list[str] = []
+    for url in urls:
+        platform = detect_platform(url)
+        if platform == "youtube" and not is_youtube_shorts(url):
+            normalized_url = await downloader.normalize_url(url)
+            if is_youtube_shorts(normalized_url):
+                filtered_urls.append(normalized_url)
+                continue
+            log_event(
+                logger,
+                logging.INFO,
+                "MESSAGE_URL_SKIPPED",
+                "skipping url because youtube link is not shorts",
+                chat_id=chat.id,
+                user_id=user.id,
+                url=normalized_url,
+                reason="youtube_not_shorts",
+            )
+            continue
+        if platform in {"instagram", "tiktok", "youtube", "redgifs"}:
+            filtered_urls.append(url)
+
+    if not filtered_urls:
+        return
+
     log_event(
         logger,
         logging.INFO,
@@ -126,7 +152,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "accepted message with media urls",
         chat_id=chat.id,
         user_id=user.id,
-        url_count=len(urls),
+        url_count=len(filtered_urls),
     )
 
     try:
@@ -134,7 +160,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception:  # noqa: BLE001
         logger.debug("failed to delete source message")
 
-    for url in urls:
+    for url in filtered_urls:
         progress_msg = await context.bot.send_message(chat_id=chat.id, text="Downloading...")
         job = QueueJob(
             url=url,
@@ -156,6 +182,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 url=url,
                 file_count=len(files),
             )
+        except UnsupportedUrl as exc:
+            await progress_msg.delete()
+            if str(exc) == "Only YouTube Shorts are supported":
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "MESSAGE_URL_SKIPPED",
+                    "skipping url because youtube link is not shorts",
+                    chat_id=chat.id,
+                    user_id=user.id,
+                    url=url,
+                    reason="youtube_not_shorts",
+                )
         except DownloadError as exc:
             log_event(
                 logger,
