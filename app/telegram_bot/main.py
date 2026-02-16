@@ -7,6 +7,7 @@ import re
 import shutil
 import time
 from collections import defaultdict, deque
+from contextlib import ExitStack
 from pathlib import Path
 
 import uvicorn
@@ -101,15 +102,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not user:
         return
 
-    if not _allowed_by_rate_limit(user.id):
-        await message.reply_text("Rate-limited. Try again later.")
-        return
-
     urls = URL_RE.findall(message.text)
     if not urls:
         return
 
     urls = urls[: settings.max_links_per_message]
+    if not _allowed_by_rate_limit(user.id):
+        log_event(
+            logger,
+            logging.INFO,
+            "MESSAGE_RATE_LIMITED",
+            "user exceeded per-window message rate limit",
+            chat_id=chat.id,
+            user_id=user.id,
+            url_count=len(urls),
+        )
+        return
+
     log_event(
         logger,
         logging.INFO,
@@ -204,34 +213,36 @@ async def _send_files(
     for i in range(0, len(files), 10):
         chunk = files[i : i + 10]
         media: list[InputMediaPhoto | InputMediaVideo | InputMediaDocument] = []
-        for idx, file in enumerate(chunk):
-            path = Path(file)
-            current_caption = caption if idx == 0 else None
-            if _is_photo(path):
-                media.append(
-                    InputMediaPhoto(
-                        media=path.open("rb"),
-                        caption=current_caption,
-                        parse_mode=ParseMode.HTML,
+        with ExitStack() as stack:
+            for idx, file in enumerate(chunk):
+                path = Path(file)
+                current_caption = caption if i == 0 and idx == 0 else None
+                file_handle = stack.enter_context(path.open("rb"))
+                if _is_photo(path):
+                    media.append(
+                        InputMediaPhoto(
+                            media=file_handle,
+                            caption=current_caption,
+                            parse_mode=ParseMode.HTML,
+                        )
                     )
-                )
-            elif _is_video(path) and path.stat().st_size <= settings.max_bot_file_bytes:
-                media.append(
-                    InputMediaVideo(
-                        media=path.open("rb"),
-                        caption=current_caption,
-                        parse_mode=ParseMode.HTML,
+                elif _is_video(path) and path.stat().st_size <= settings.max_bot_file_bytes:
+                    media.append(
+                        InputMediaVideo(
+                            media=file_handle,
+                            caption=current_caption,
+                            parse_mode=ParseMode.HTML,
+                        )
                     )
-                )
-            else:
-                media.append(
-                    InputMediaDocument(
-                        media=path.open("rb"),
-                        caption=current_caption,
-                        parse_mode=ParseMode.HTML,
+                else:
+                    media.append(
+                        InputMediaDocument(
+                            media=file_handle,
+                            caption=current_caption,
+                            parse_mode=ParseMode.HTML,
+                        )
                     )
-                )
-        await context.bot.send_media_group(chat_id=chat_id, media=media)
+            await context.bot.send_media_group(chat_id=chat_id, media=media)
     _cleanup_files(files)
 
 
