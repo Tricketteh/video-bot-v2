@@ -21,6 +21,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatType, ParseMode
+from telegram.error import TimedOut
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -171,7 +172,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         try:
             files = await job_queue.submit(job)
             await _send_files(context, chat.id, files, job.username, url)
-            await progress_msg.delete()
+            try:
+                await progress_msg.delete()
+            except Exception:  # noqa: BLE001
+                logger.debug("failed to delete progress message")
             log_event(
                 logger,
                 logging.INFO,
@@ -183,7 +187,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 file_count=len(files),
             )
         except UnsupportedUrl as exc:
-            await progress_msg.delete()
+            try:
+                await progress_msg.delete()
+            except Exception:  # noqa: BLE001
+                logger.debug("failed to delete progress message")
             if str(exc) == "Only YouTube Shorts are supported":
                 log_event(
                     logger,
@@ -206,10 +213,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 user_id=user.id,
                 reason=str(exc),
             )
-            await progress_msg.edit_text(f"Error: {exc}")
+            try:
+                await progress_msg.edit_text(f"Error: {exc}")
+            except Exception:  # noqa: BLE001
+                logger.debug("failed to edit progress message with download error")
+        except TimedOut:
+            log_event(
+                logger,
+                logging.WARNING,
+                "MESSAGE_URL_TIMEOUT_IGNORED",
+                "telegram timeout during status/update operation; suppressing user-facing error",
+                chat_id=chat.id,
+                user_id=user.id,
+                url=url,
+            )
+            try:
+                await progress_msg.delete()
+            except Exception:  # noqa: BLE001
+                logger.debug("failed to delete progress message after timeout")
         except Exception as exc:  # noqa: BLE001
             logger.exception("unexpected handling failure")
-            await progress_msg.edit_text(f"Error: {exc}")
+            try:
+                await progress_msg.edit_text(f"Error: {exc}")
+            except Exception:  # noqa: BLE001
+                logger.debug("failed to edit progress message with unexpected error")
 
 
 async def handle_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
